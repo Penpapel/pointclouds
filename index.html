@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#050506">
+<title>Organic Lattice</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{
+  height:100%;
+  background:#050506;
+  overscroll-behavior:none;
+  touch-action:pan-y;
+}
+body{
+  font-family:'DM Mono',ui-monospace,'Courier New',monospace;
+  color:#e8e6e0;
+  -webkit-font-smoothing:antialiased;
+}
+#canvas-wrap{position:fixed;inset:0;z-index:0}
+canvas{display:block;width:100%!important;height:100%!important}
+#spacer{position:relative;z-index:0;pointer-events:none}
+</style>
+</head>
+<body>
+
+<div id="canvas-wrap"><canvas id="c"></canvas></div>
+<div id="spacer"></div>
+
+<script>
+(function(){
+// ═══════════════════════════════════════════════════════
+//  SCENE
+// ═══════════════════════════════════════════════════════
+const renderer = new THREE.WebGLRenderer({canvas:document.getElementById('c'),antialias:false});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,1.5));
+
+const scene = new THREE.Scene();
+// Intro-only fog: fades the far reaches of the grid into the background so
+// a finite grid of points reads as an endless field. Faded out and removed
+// once the lattice takes over.
+// near/far are tuned around camR (8) and the grid's own half-depth (~2.5-3):
+// the closest grid points sit ~5.5 units out and the farthest ~10.5-11 —
+// near/far used to be 4.5/10.5, which fogged out roughly the whole far half
+// of the grid into total invisibility. Pushed both out so the grid itself
+// reads clearly and only its outermost edge gets a gentle depth fade.
+scene.fog = new THREE.Fog(0x050506, 9.5, 15.5);
+
+const camera = new THREE.PerspectiveCamera(58,window.innerWidth/window.innerHeight,0.01,1000);
+// Pulled in closer than before (was 8.0) so the camera sits nearer the
+// lattice's own extent — you read structure/detail up close rather than
+// the whole cluster's outer silhouette, which is what made it look like a
+// discrete "shape" (ball/blob) instead of an immersive structure.
+let camR = 5.0; // orbit / dolly distance — pinch-zoom adjusts this
+const CAM_R_MIN=2.0, CAM_R_MAX=14;
+camera.position.set(0,0,camR);
+
+function sizeRenderer(){
+  const w=window.innerWidth,h=window.innerHeight;
+  renderer.setSize(w,h);
+  camera.aspect=w/h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize',sizeRenderer);
+window.addEventListener('orientationchange',()=>setTimeout(sizeRenderer,250));
+
+// ═══════════════════════════════════════════════════════
+//  CONFIG — "Organic Lattice" preset, held fixed.
+//  Only Count / Speed / Spread / Inertia / Turbulence animate.
+// ═══════════════════════════════════════════════════════
+const PAL = {h:270,r:80,s:1.0}; // Plasma
+const CFG = {
+  nodeSpacing:0.3,
+  freeform:0.7,
+  strutsK:4,
+  strutMin:0.08,
+  strutMax:0.6,
+  pointSize:1.7,
+  brightness:1.0,
+  hueCycleSpeed:0.055,
+  touchForce:0.5,
+  touchRadius:1.1,
+};
+
+// Safe, gentle animation ranges (kept low so it never gets fast or crowded)
+const RANGES = {
+  speed:       [0.07, 0.24],
+  spread:      [0.95, 1.45],
+  inertia:     [0.90, 0.965],
+  turbulence:  [0.04, 0.18],
+  count:       [450, 1200],
+};
+// MAX_COUNT matches RANGES.count's upper bound exactly, so the intro grid
+// and the very first physics frame line up with zero points popping in/out.
+const MAX_COUNT = 1200; // hard ceiling, pre-allocated once
+const GRID_NX=10, GRID_NY=12, GRID_NZ=10; // 10*12*10 = 1200
+const GRID_SPACING=0.55;
+
+// ═══════════════════════════════════════════════════════
+//  PARTICLES (pre-allocated at MAX_COUNT; active subset animates)
+// ═══════════════════════════════════════════════════════
+let positions, velocities, geometry, points;
+const INTRO_WHITE = 0.96; // intro grid color; also the color the lattice fades in from
+const INTRO_POINT_SIZE = 0.018, LATTICE_POINT_SIZE = 0.01; // ×CFG.pointSize
+
+function initParticles(){
+  positions  = new Float32Array(MAX_COUNT*3);
+  velocities = new Float32Array(MAX_COUNT*3);
+
+  // Intro state: a perfectly even 3D grid (not the random scatter the old
+  // relaxation used to start from) — first touch is what releases these
+  // into the physics simulation below.
+  let idx=0;
+  for(let ix=0;ix<GRID_NX;ix++)for(let iy=0;iy<GRID_NY;iy++)for(let iz=0;iz<GRID_NZ;iz++){
+    positions[idx*3]  =(ix-(GRID_NX-1)/2)*GRID_SPACING;
+    positions[idx*3+1]=(iy-(GRID_NY-1)/2)*GRID_SPACING;
+    positions[idx*3+2]=(iz-(GRID_NZ-1)/2)*GRID_SPACING;
+    velocities[idx*3]=0;velocities[idx*3+1]=0;velocities[idx*3+2]=0;
+    idx++;
+  }
+
+  geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions,3));
+  const colors = new Float32Array(MAX_COUNT*3);
+  // Intro points start bright white (not palette-tinted) so the grid reads
+  // clearly and boldly the instant the page loads. This is a static fill —
+  // no per-frame shimmer — and animate() eases it toward the real lattice
+  // palette colors over COLOR_FADE_DURATION once physics takes over.
+  for(let i=0;i<MAX_COUNT;i++){
+    colors[i*3]=INTRO_WHITE;colors[i*3+1]=INTRO_WHITE;colors[i*3+2]=INTRO_WHITE;
+  }
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors,3));
+  geometry.setDrawRange(0,MAX_COUNT);
+
+  const mat = new THREE.PointsMaterial({
+    size:CFG.pointSize*INTRO_POINT_SIZE, // brighter/bigger presence at intro
+    vertexColors:true,
+    transparent:true,
+    opacity:0.95,
+    sizeAttenuation:true,
+    depthWrite:false,
+    blending:THREE.AdditiveBlending,
+    fog:true,
+  });
+  points = new THREE.Points(geometry,mat);
+  scene.add(points);
+}
+initParticles();
+
+// ═══════════════════════════════════════════════════════
+//  NOISE
+// ═══════════════════════════════════════════════════════
+function fade(t){return t*t*t*(t*(t*6-15)+10)}
+function lerp(a,b,t){return a+t*(b-a)}
+const perm=(()=>{const p=[];for(let i=0;i<256;i++)p[i]=i;for(let i=255;i>0;i--){const j=Math.floor(Math.random()*(i+1));[p[i],p[j]]=[p[j],p[i]];}return [...p,...p]})();
+function grad3(h,x,y,z){const u=h<8?x:y,v=h<4?y:h===12||h===14?x:z;return((h&1)?-u:u)+((h&2)?-v:v)}
+function noise3(x,y,z){
+  const X=Math.floor(x)&255,Y=Math.floor(y)&255,Z=Math.floor(z)&255;
+  x-=Math.floor(x);y-=Math.floor(y);z-=Math.floor(z);
+  const u=fade(x),v=fade(y),w=fade(z);
+  const A=perm[X]+Y,AA=perm[A]+Z,AB=perm[A+1]+Z,B=perm[X+1]+Y,BA=perm[B]+Z,BB=perm[B+1]+Z;
+  return lerp(lerp(lerp(grad3(perm[AA],x,y,z),grad3(perm[BA],x-1,y,z),u),
+    lerp(grad3(perm[AB],x,y-1,z),grad3(perm[BB],x-1,y-1,z),u),v),
+    lerp(lerp(grad3(perm[AA+1],x,y,z-1),grad3(perm[BA+1],x-1,y,z-1),u),
+    lerp(grad3(perm[AB+1],x,y-1,z-1),grad3(perm[BB+1],x-1,y-1,z-1),u),v),w);
+}
+function curlNoise(x,y,z,e=0.0001){
+  const n1=noise3(x,y+e,z)-noise3(x,y-e,z);
+  const n2=noise3(x,y,z+e)-noise3(x,y,z-e);
+  const n3=noise3(x+e,y,z)-noise3(x-e,y,z);
+  const n4=noise3(x,y,z+e)-noise3(x,y,z-e);
+  const n5=noise3(x+e,y,z)-noise3(x-e,y,z);
+  const n6=noise3(x,y+e,z)-noise3(x,y-e,z);
+  return [(n1-n2)/(2*e),(n3-n4)/(2*e),(n5-n6)/(2*e)];
+}
+function hslToRgb(h,s,l){
+  h=((h%360)+360)%360;
+  const c=(1-Math.abs(2*l-1))*s;
+  const x=c*(1-Math.abs((h/60)%2-1));
+  const m=l-c/2;
+  let r=0,g=0,b=0;
+  if(h<60){r=c;g=x}else if(h<120){r=x;g=c}else if(h<180){g=c;b=x}
+  else if(h<240){g=x;b=c}else if(h<300){r=x;b=c}else{r=c;b=x}
+  return [r+m,g+m,b+m];
+}
+
+// ═══════════════════════════════════════════════════════
+//  SPATIAL HASH GRID (neighbor queries for relaxation + struts)
+// ═══════════════════════════════════════════════════════
+class SpatialGrid{
+  constructor(cellSize){this.cellSize=Math.max(cellSize,0.02);this.map=new Map();this.cellsOf=null;}
+  key(ix,iy,iz){return ix+'_'+iy+'_'+iz;}
+  build(posArr,n){
+    this.map.clear();
+    if(!this.cellsOf||this.cellsOf.length<n*3) this.cellsOf=new Int32Array(n*3);
+    const cs=this.cellSize;
+    for(let i=0;i<n;i++){
+      const i3=i*3;
+      const ix=Math.floor(posArr[i3]/cs),iy=Math.floor(posArr[i3+1]/cs),iz=Math.floor(posArr[i3+2]/cs);
+      this.cellsOf[i3]=ix;this.cellsOf[i3+1]=iy;this.cellsOf[i3+2]=iz;
+      const k=this.key(ix,iy,iz);
+      let arr=this.map.get(k);
+      if(!arr){arr=[];this.map.set(k,arr);}
+      arr.push(i);
+    }
+  }
+  forNeighbors(i,cb){
+    const i3=i*3;
+    const ix=this.cellsOf[i3],iy=this.cellsOf[i3+1],iz=this.cellsOf[i3+2];
+    for(let dx=-1;dx<=1;dx++)for(let dy=-1;dy<=1;dy++)for(let dz=-1;dz<=1;dz++){
+      const arr=this.map.get(this.key(ix+dx,iy+dy,iz+dz));
+      if(arr) for(let k=0;k<arr.length;k++){const j=arr[k]; if(j!==i) cb(j);}
+    }
+  }
+}
+
+let sfGrid=null, sfStrutGrid=null;
+let strutEdges=[];
+let nodeValence=null, maxValence=1;
+let strutGeometry, strutLines, strutPositions, strutColors;
+let framesSinceRebuild=999;
+const STRUT_REBUILD_INTERVAL=22;
+
+// ── Strut intro choreography ──────────────────────────────────────────
+// Struts stay off entirely until the points have had time to move away
+// from their perfectly even starting grid and start reading as organic;
+// then, instead of the first graph popping in all at once, each edge
+// fades in on its own staggered delay so the structure visibly *emerges*
+// as a series of links before settling into normal full-brightness behavior.
+let firstStrutBuildDone=false;
+let strutEmergeActive=false, strutEmergeStartT=0;
+const STRUT_FIRST_DELAY=2.1;   // seconds of physics before struts are allowed at all (past full wake)
+const STRUT_EMERGE_SPREAD=1.1; // seconds over which different edges begin fading in
+const STRUT_EMERGE_FADE=0.45;  // seconds each edge takes to reach full brightness
+
+// Deterministic per-edge pseudo-random delay (stable across graph rebuilds,
+// since the edge array is rebuilt/reordered periodically during the emerge
+// window) — hashes the (unordered) node-index pair to a value in [0,1).
+function hashEdgeDelay(i,j){
+  const a=Math.min(i,j), b=Math.max(i,j);
+  const key=a*2654435761+b;
+  let h=Math.imul(key ^ (key>>>15), 2246822519)>>>0;
+  h=(h ^ (h>>>13))>>>0;
+  return (h%10000)/10000;
+}
+
+function buildStrutGeometry(edges){
+  if(strutLines){scene.remove(strutLines);strutGeometry.dispose();strutLines.material.dispose();}
+  const m=edges.length;
+  strutPositions=new Float32Array(Math.max(m,1)*2*3);
+  strutColors=new Float32Array(Math.max(m,1)*2*3);
+  strutGeometry=new THREE.BufferGeometry();
+  strutGeometry.setAttribute('position',new THREE.BufferAttribute(strutPositions,3));
+  strutGeometry.setAttribute('color',new THREE.BufferAttribute(strutColors,3));
+  strutGeometry.setDrawRange(0,m*2);
+  const mat=new THREE.LineBasicMaterial({vertexColors:true,transparent:true,opacity:0.5,blending:THREE.AdditiveBlending,depthWrite:false,fog:true});
+  strutLines=new THREE.LineSegments(strutGeometry,mat);
+  scene.add(strutLines);
+}
+buildStrutGeometry([]);
+
+function updateNodeValence(edges,n){
+  if(!nodeValence||nodeValence.length<n) nodeValence=new Float32Array(n);
+  else nodeValence.fill(0,0,n);
+  for(let e=0;e<edges.length;e++){nodeValence[edges[e][0]]++;nodeValence[edges[e][1]]++;}
+  maxValence=1;
+  for(let i=0;i<n;i++) if(nodeValence[i]>maxValence) maxValence=nodeValence[i];
+}
+
+function rebuildStrutGraph(n){
+  const posArr=geometry.attributes.position.array;
+  const cell=Math.max(CFG.strutMax,0.05);
+  if(!sfStrutGrid||sfStrutGrid.cellSize!==cell) sfStrutGrid=new SpatialGrid(cell);
+  sfStrutGrid.build(posArr,n);
+  const edgeSet=new Set();
+  const edges=[];
+  const candidates=[];
+  for(let i=0;i<n;i++){
+    candidates.length=0;
+    const i3=i*3;
+    const xi=posArr[i3],yi=posArr[i3+1],zi=posArr[i3+2];
+    sfStrutGrid.forNeighbors(i,j=>{
+      const j3=j*3;
+      const dx=posArr[j3]-xi,dy=posArr[j3+1]-yi,dz=posArr[j3+2]-zi;
+      const d=Math.sqrt(dx*dx+dy*dy+dz*dz);
+      if(d>=CFG.strutMin&&d<=CFG.strutMax) candidates.push([j,d]);
+    });
+    candidates.sort((a,b)=>a[1]-b[1]);
+    const k=Math.min(CFG.strutsK,candidates.length);
+    for(let c=0;c<k;c++){
+      const j=candidates[c][0];
+      const key=i<j?(i+'_'+j):(j+'_'+i);
+      if(!edgeSet.has(key)){edgeSet.add(key);edges.push(i<j?[i,j]:[j,i]);}
+    }
+  }
+  strutEdges=edges;
+  buildStrutGeometry(edges);
+  updateNodeValence(edges,n);
+}
+
+function refreshStrutBuffers(hueBase){
+  if(!strutLines||!strutEdges.length) return;
+  const posArr=geometry.attributes.position.array;
+  const minLen=CFG.strutMin, maxLen=CFG.strutMax;
+  for(let e=0;e<strutEdges.length;e++){
+    const pair=strutEdges[e];
+    const i=pair[0], j=pair[1];
+    const i3=i*3,j3=j*3,e6=e*6;
+    const xi=posArr[i3],yi=posArr[i3+1],zi=posArr[i3+2];
+    const xj=posArr[j3],yj=posArr[j3+1],zj=posArr[j3+2];
+    strutPositions[e6]=xi;strutPositions[e6+1]=yi;strutPositions[e6+2]=zi;
+    strutPositions[e6+3]=xj;strutPositions[e6+4]=yj;strutPositions[e6+5]=zj;
+
+    const dx=xj-xi,dy=yj-yi,dz=zj-zi;
+    const d=Math.sqrt(dx*dx+dy*dy+dz*dz);
+    const tn=Math.min(Math.max((d-minLen)/(maxLen-minLen+1e-6),0),1);
+    let h=(PAL.h+hueBase+tn*PAL.r)%360, s=PAL.s, l=Math.min(Math.max((0.2+tn*0.45)*CFG.brightness,0),1);
+    let [r,g,b]=hslToRgb(h,s,l);
+
+    if(strutEmergeActive){
+      const delay=hashEdgeDelay(i,j)*STRUT_EMERGE_SPREAD;
+      let a=(tPhysics-strutEmergeStartT-delay)/STRUT_EMERGE_FADE;
+      a=Math.min(Math.max(a,0),1);
+      a=a*a*(3-2*a); // smoothstep — eases each link in rather than a hard cut
+      r*=a;g*=a;b*=a;
+    }
+
+    strutColors[e6]=r;strutColors[e6+1]=g;strutColors[e6+2]=b;
+    strutColors[e6+3]=r;strutColors[e6+4]=g;strutColors[e6+5]=b;
+  }
+  strutGeometry.attributes.position.needsUpdate=true;
+  strutGeometry.attributes.color.needsUpdate=true;
+}
+
+// ═══════════════════════════════════════════════════════
+//  TOUCH — a gentle repulsion under the finger, keeps it alive to the touch
+// ═══════════════════════════════════════════════════════
+const touch3D=new THREE.Vector3(9999,9999,9999);
+let touchActive=false;
+function updateTouchPoint(clientX,clientY){
+  const nx=(clientX/window.innerWidth)*2-1;
+  const ny=-(clientY/window.innerHeight)*2+1;
+  const v=new THREE.Vector3(nx,ny,0.5);
+  v.unproject(camera);
+  const dir=v.sub(camera.position).normalize();
+  const dist=-camera.position.z/dir.z;
+  touch3D.copy(camera.position).addScaledVector(dir,dist);
+}
+// ═══════════════════════════════════════════════════════
+//  PINCH-ZOOM (two fingers) — dollies camR in/out
+// ═══════════════════════════════════════════════════════
+let pinchActive=false, pinchStartDist=0, pinchStartR=camR;
+function touchDist(a,b){const dx=a.clientX-b.clientX,dy=a.clientY-b.clientY;return Math.sqrt(dx*dx+dy*dy);}
+
+// ═══════════════════════════════════════════════════════
+//  FIRST TOUCH — releases the grid into the lattice simulation
+// ═══════════════════════════════════════════════════════
+let physicsOn=false, tPhysics=0;
+let meltDir=null; // per-point fixed random direction — see MELT_* below
+function startPhysics(){
+  if(physicsOn) return;
+  physicsOn=true;
+  tPhysics=0;
+  prevN=0;
+  // A whisper-quiet positional jitter — just enough to break the grid's
+  // exact symmetry, not visible as a jump. Velocity is left at exactly
+  // zero — nothing actually moves yet.
+  const jitter=GRID_SPACING*0.08;
+  meltDir=new Float32Array(MAX_COUNT*3);
+  for(let i=0;i<MAX_COUNT;i++){
+    const i3=i*3;
+    positions[i3]  +=(Math.random()-0.5)*jitter;
+    positions[i3+1]+=(Math.random()-0.5)*jitter;
+    positions[i3+2]+=(Math.random()-0.5)*jitter;
+    // A fixed-per-point random direction (see MELT_* in animate): all of
+    // the real physics forces (containment, warp, curl) vary smoothly over
+    // a length scale much larger than the grid spacing, so on their own
+    // they just deform the whole grid as one coherent block — stretching
+    // and shearing it — without ever scrambling which point sits next to
+    // which. That reads as a warped grid, not an organic cloud, no matter
+    // how long you wait. meltDir is per-index (not position-based) noise,
+    // so it's what actually randomizes local neighbor order.
+    let dx=Math.random()*2-1,dy=Math.random()*2-1,dz=Math.random()*2-1;
+    const dl=Math.sqrt(dx*dx+dy*dy+dz*dz)||1;
+    meltDir[i3]=dx/dl;meltDir[i3+1]=dy/dl;meltDir[i3+2]=dz/dl;
+  }
+  // Struts themselves stay off until STRUT_FIRST_DELAY seconds of physics
+  // have passed (see the animate loop) — well past both the wake ramp and
+  // the melt pulse, so the structure is already genuinely organic (not
+  // just a stretched grid) before any links appear.
+  firstStrutBuildDone=false;
+  strutEmergeActive=false;
+  framesSinceRebuild=999;
+}
+
+window.addEventListener('touchstart',e=>{
+  if(e.touches.length>=2){
+    pinchActive=true;
+    touchActive=false;
+    pinchStartDist=touchDist(e.touches[0],e.touches[1]);
+    pinchStartR=camR;
+  } else if(e.touches.length===1){
+    touchActive=true;
+    updateTouchPoint(e.touches[0].clientX,e.touches[0].clientY);
+  }
+  startPhysics();
+},{passive:true});
+
+window.addEventListener('touchmove',e=>{
+  if(pinchActive&&e.touches.length>=2){
+    e.preventDefault();
+    const d=touchDist(e.touches[0],e.touches[1]);
+    camR=Math.min(CAM_R_MAX,Math.max(CAM_R_MIN, pinchStartR*pinchStartDist/Math.max(d,1)));
+  } else if(touchActive&&e.touches.length===1){
+    updateTouchPoint(e.touches[0].clientX,e.touches[0].clientY);
+  }
+},{passive:false});
+
+function onTouchEnd(e){
+  if(e.touches.length<2) pinchActive=false;
+  if(e.touches.length===0){
+    touchActive=false;
+    touch3D.set(9999,9999,9999);
+  } else if(e.touches.length===1){
+    touchActive=true;
+    updateTouchPoint(e.touches[0].clientX,e.touches[0].clientY);
+  }
+}
+window.addEventListener('touchend',onTouchEnd,{passive:true});
+window.addEventListener('touchcancel',onTouchEnd,{passive:true});
+
+// ═══════════════════════════════════════════════════════
+//  ENDLESS VERTICAL SCROLL
+//  The scroll track is invisible (canvas is fixed); we silently recenter
+//  scrollTop whenever it nears an edge, so the gesture never runs out,
+//  while an unbounded angle keeps accumulating to drive the camera orbit.
+// ═══════════════════════════════════════════════════════
+const VH=()=>window.innerHeight;
+let scrollAngle=0, lastScrollY=0;
+
+function armSpacer(){
+  const vh=VH();
+  document.getElementById('spacer').style.height=(vh*6)+'px';
+  window.scrollTo(0, vh*2.5);
+  lastScrollY=window.scrollY;
+}
+armSpacer();
+window.addEventListener('resize',armSpacer);
+
+window.addEventListener('scroll',()=>{
+  const y=window.scrollY;
+  const dy=y-lastScrollY;
+  scrollAngle+=dy*0.0035;
+  lastScrollY=y;
+  const vh=VH();
+  if(y<vh*0.5||y>vh*4.5){
+    window.scrollTo(0, vh*2.5);
+    lastScrollY=window.scrollY;
+  }
+},{passive:true});
+
+// ═══════════════════════════════════════════════════════
+//  ANIMATED PARAMETERS — smooth, slow, independent oscillators.
+//  Speed starts at its lowest value and never gets fast; count stays modest.
+// ═══════════════════════════════════════════════════════
+function osc(range,period,phase,tsec,startLow){
+  const w=2*Math.PI/period;
+  const ph=tsec*w+phase;
+  const s=startLow?(0.5-0.5*Math.cos(ph)):(0.5+0.5*Math.sin(ph));
+  return range[0]+(range[1]-range[0])*s;
+}
+
+// A sine's rate of change slows to zero at its peak/trough, so it lingers
+// there — long enough for the relaxation to fully settle into a static
+// "ball". A triangle wave ramps at a constant rate and only ever touches
+// the top/bottom for an instant, so count is always climbing or falling —
+// the lattice keeps morphing and never has time to settle.
+function triangleWave(period,phase,tsec){
+  const x=(((tsec+phase)%period)+period)%period/period;
+  return 1-Math.abs(2*x-1);
+}
+function smoothstep01(x){x=Math.min(Math.max(x,0),1);return x*x*(3-2*x);}
+
+// ═══════════════════════════════════════════════════════
+//  ANIMATE
+// ═══════════════════════════════════════════════════════
+// The grid→lattice transition eases in on these timescales instead of
+// switching on all at once: forces (and therefore all motion) fade in from
+// zero over WAKE_DURATION, point color/size cross-fade over the same span,
+// and struts wait until well past full wake before they're even allowed to
+// start (their own staggered emerge — see STRUT_* above — follows after).
+const WAKE_DURATION=1.8;
+const COLOR_FADE_DURATION=1.6;
+
+// MELT: a per-point-random (not position-based) impulse that actually
+// scrambles the grid's local neighbor order — see meltDir above for why
+// this is necessary. It rises quickly, holds, then fades back out, leaving
+// the normal tuned physics in sole control from then on.
+const MELT_STRENGTH=0.06;
+function meltEnvelope(tp){
+  if(tp<0.2) return smoothstep01(tp/0.2);
+  if(tp<1.0) return 1;
+  if(tp<2.0) return 1-smoothstep01((tp-1.0)/1.0);
+  return 0;
+}
+let t=0, lastTime=performance.now(), autoAngle=0, prevN=0;
+
+function animate(now){
+  requestAnimationFrame(animate);
+  const dt=Math.min((now-lastTime)/1000,0.05);
+  lastTime=now;
+  t+=dt;
+  autoAngle+=dt*0.018; // slow autonomous drift so it flows even without scrolling
+
+  const posArr=geometry.attributes.position.array;
+  const colArr=geometry.attributes.color.array;
+  const hueBase=t*CFG.hueCycleSpeed*360; // color keeps cycling continuously, intro included
+
+  if(!physicsOn){
+    // ── INTRO: a frozen, perfectly even grid. Nothing moves, and the color
+    // (bright white, set once in initParticles) never changes — until the
+    // first touch releases it into the sim below.
+    geometry.setDrawRange(0,MAX_COUNT);
+
+  } else {
+    tPhysics+=dt;
+
+    const speed      = osc(RANGES.speed,      115, 0.0, tPhysics, true);
+    const spread      = osc(RANGES.spread,     140, 1.7, tPhysics, false);
+    const inertia     = osc(RANGES.inertia,    165, 3.4, tPhysics, false);
+    const turbulence  = osc(RANGES.turbulence,  95, 0.9, tPhysics, false);
+    // Phase 35 (half the 70s period) puts the triangle wave at its peak when
+    // tPhysics=0 — count starts at MAX_COUNT so every grid point that was
+    // on screen keeps animating, instead of most of them vanishing the
+    // instant physics turns on.
+    const n = Math.max(60,Math.min(MAX_COUNT,Math.round(
+      RANGES.count[0]+(RANGES.count[1]-RANGES.count[0])*triangleWave(70,35,tPhysics)
+    )));
+
+    const bound=spread*3.5;
+
+    // Newly-activated nodes bud off an existing node instead of reappearing at
+    // their long-ago initial scatter position (which would look like stray
+    // dots flying in from far away as Count ramps up).
+    if(n>prevN&&prevN>0){
+      for(let i=prevN;i<n;i++){
+        const src=(Math.random()*prevN)|0;
+        const s3=src*3, i3n=i*3;
+        positions[i3n]  =positions[s3]  +(Math.random()-0.5)*0.2;
+        positions[i3n+1]=positions[s3+1]+(Math.random()-0.5)*0.2;
+        positions[i3n+2]=positions[s3+2]+(Math.random()-0.5)*0.2;
+        velocities[i3n]=velocities[s3];velocities[i3n+1]=velocities[s3+1];velocities[i3n+2]=velocities[s3+2];
+      }
+    }
+    prevN=n;
+
+    // Shape morphing: an anisotropic containment "well" whose three axis
+    // lengths breathe independently and whose orientation slowly tumbles —
+    // this is what keeps the overall silhouette elongating/flattening/turning
+    // instead of settling into a fixed round ball. A slow, low-frequency curl
+    // field bends the whole cloud on top of that for extra organic irregularity.
+    const ax=1+0.7*Math.sin(tPhysics*2*Math.PI/47+0.3);
+    const ay=1+0.7*Math.sin(tPhysics*2*Math.PI/61+2.1);
+    const az=1+0.7*Math.sin(tPhysics*2*Math.PI/53+4.0);
+    const rot=tPhysics*0.05;
+    const cosR=Math.cos(rot), sinR=Math.sin(rot);
+    const warpT=tPhysics*0.05;
+
+    const cell=Math.max(CFG.nodeSpacing*1.8,0.05);
+    if(!sfGrid||sfGrid.cellSize!==cell) sfGrid=new SpatialGrid(cell);
+    sfGrid.build(posArr,n);
+
+    const repR=CFG.nodeSpacing*1.8;
+    // Everything below fades in from zero over WAKE_DURATION — the grid
+    // starts completely still (velocity untouched at 0) and physics eases
+    // up gradually, rather than switching on at full strength the instant
+    // you touch. That's what makes the grid→lattice transition read as one
+    // continuous wake-up instead of a hard switch between two states.
+    const wake=smoothstep01(tPhysics/WAKE_DURATION);
+    const colorFade=smoothstep01(tPhysics/COLOR_FADE_DURATION);
+    points.material.size=CFG.pointSize*lerp(INTRO_POINT_SIZE,LATTICE_POINT_SIZE,colorFade);
+    const meltMag=MELT_STRENGTH*meltEnvelope(tPhysics);
+
+    for(let i=0;i<n;i++){
+      const i3=i*3;
+      let px=posArr[i3],py=posArr[i3+1],pz=posArr[i3+2];
+      let vx=velocities[i3],vy=velocities[i3+1],vz=velocities[i3+2];
+
+      let fx=0,fy=0,fz=0;
+
+      sfGrid.forNeighbors(i,j=>{
+        const j3=j*3;
+        const dx=px-posArr[j3],dy=py-posArr[j3+1],dz=pz-posArr[j3+2];
+        const d2=dx*dx+dy*dy+dz*dz;
+        if(d2<repR*repR&&d2>1e-8){
+          const d=Math.sqrt(d2);
+          const push=(repR-d)/repR;
+          const str=push*push*0.06*speed;
+          fx+=dx/d*str;fy+=dy/d*str;fz+=dz/d*str;
+        }
+      });
+      // Anisotropic, tumbling containment — the equilibrium shape is an
+      // ellipsoid whose axes and orientation keep changing, not a sphere.
+      const rx=px*cosR-pz*sinR, rz=px*sinR+pz*cosR;
+      const k=0.012;
+      const frx=-rx*k/(ax*ax), fry=-py*k/(ay*ay), frz=-rz*k/(az*az);
+      fx+=frx*cosR+frz*sinR;
+      fz+=-frx*sinR+frz*cosR;
+      fy+=fry;
+
+      // Large-scale bend across the whole cloud. Frequency is chosen so the
+      // field varies noticeably *within* the cluster's own extent (not just
+      // across it) — a much lower frequency reads mostly as bodily translation,
+      // which the recentering step below would cancel out, erasing the effect.
+      const wl=curlNoise(px*0.35+warpT,py*0.35,pz*0.35+warpT*0.7);
+      fx+=wl[0]*0.09*speed;
+      fy+=wl[1]*0.09*speed;
+      fz+=wl[2]*0.09*speed;
+
+      // Local high-frequency churn (the original "freeform" texture)
+      const cl=curlNoise(px*0.18+tPhysics*0.03,py*0.18,pz*0.18);
+      fx+=cl[0]*CFG.freeform*speed*0.05;
+      fy+=cl[1]*CFG.freeform*speed*0.05;
+      fz+=cl[2]*CFG.freeform*speed*0.05;
+
+      if(turbulence>0){
+        fx+=noise3(px*0.8+tPhysics*0.3,py*0.8,pz*0.8)*turbulence*0.04;
+        fy+=noise3(px*0.8,py*0.8+tPhysics*0.3,pz*0.8)*turbulence*0.04;
+        fz+=noise3(px*0.8,py*0.8,pz*0.8+tPhysics*0.3)*turbulence*0.04;
+      }
+
+      if(touchActive){
+        const mdx=px-touch3D.x,mdy=py-touch3D.y,mdz=pz-touch3D.z;
+        const md2=mdx*mdx+mdy*mdy+mdz*mdz;
+        const mr2=CFG.touchRadius*CFG.touchRadius;
+        if(md2<mr2&&md2>0.0001){
+          const md=Math.sqrt(md2);
+          const str=CFG.touchForce*0.04*(1-md/CFG.touchRadius);
+          fx+=mdx/md*str;fy+=mdy/md*str;fz+=mdz/md*str;
+        }
+      }
+
+      fx*=wake;fy*=wake;fz*=wake;
+
+      // Melt bypasses the wake ramp deliberately — it's not part of the
+      // tuned motion, it's what breaks the grid's local ordering. It has
+      // its own envelope (already faded in/out by tPhysics, see above).
+      if(meltMag>0){
+        fx+=meltDir[i3]*meltMag;
+        fy+=meltDir[i3+1]*meltMag;
+        fz+=meltDir[i3+2]*meltMag;
+      }
+
+      vx=(vx+fx)*inertia;
+      vy=(vy+fy)*inertia;
+      vz=(vz+fz)*inertia;
+      const vlen=Math.sqrt(vx*vx+vy*vy+vz*vz);
+      const maxV=speed*0.12;
+      if(vlen>maxV){const k=maxV/vlen;vx*=k;vy*=k;vz*=k;}
+
+      px+=vx;py+=vy;pz+=vz;
+      if(px>bound)px=bound; if(px<-bound)px=-bound;
+      if(py>bound)py=bound; if(py<-bound)py=-bound;
+      if(pz>bound)pz=bound; if(pz<-bound)pz=-bound;
+
+      posArr[i3]=px;posArr[i3+1]=py;posArr[i3+2]=pz;
+      velocities[i3]=vx;velocities[i3+1]=vy;velocities[i3+2]=vz;
+
+      const vspd=Math.sqrt(vx*vx+vy*vy+vz*vz)/maxV;
+      let h=(PAL.h+hueBase+vspd*PAL.r)%360;
+      let l=0.32+vspd*0.42;
+      if(nodeValence&&i<nodeValence.length) l+=(nodeValence[i]/maxValence)*0.15;
+      l=Math.min(Math.max(l*CFG.brightness,0),1);
+      let [r2,g,b]=hslToRgb(h,PAL.s,l);
+      if(colorFade<1){
+        r2=lerp(INTRO_WHITE,r2,colorFade);
+        g =lerp(INTRO_WHITE,g ,colorFade);
+        b =lerp(INTRO_WHITE,b ,colorFade);
+      }
+      colArr[i3]=r2;colArr[i3+1]=g;colArr[i3+2]=b;
+    }
+
+    // Recenter on the centroid every frame. The large-scale warp field is
+    // divergence-free in theory, but sampled across a cluster much smaller
+    // than its wavelength it behaves like a near-uniform "wind" that would
+    // otherwise carry the whole lattice sideways out of frame (the camera
+    // always looks at the origin) — this keeps the *shape* free to morph
+    // without letting the *position* wander off.
+    let cx=0,cy=0,cz=0;
+    for(let i=0;i<n;i++){const i3=i*3;cx+=posArr[i3];cy+=posArr[i3+1];cz+=posArr[i3+2];}
+    cx/=n;cy/=n;cz/=n;
+    for(let i=0;i<n;i++){const i3=i*3;posArr[i3]-=cx;posArr[i3+1]-=cy;posArr[i3+2]-=cz;}
+
+    geometry.setDrawRange(0,n);
+    geometry.attributes.position.needsUpdate=true;
+    geometry.attributes.color.needsUpdate=true;
+
+    if(!firstStrutBuildDone){
+      // No struts at all yet — wait until the points have visibly moved off
+      // their perfectly even starting grid before the first graph is built.
+      if(tPhysics>=STRUT_FIRST_DELAY){
+        rebuildStrutGraph(n);
+        firstStrutBuildDone=true;
+        strutEmergeActive=true;
+        strutEmergeStartT=tPhysics;
+        framesSinceRebuild=0;
+      }
+    } else {
+      framesSinceRebuild++;
+      if(framesSinceRebuild>=STRUT_REBUILD_INTERVAL){
+        rebuildStrutGraph(n);
+        framesSinceRebuild=0;
+      }
+      if(strutEmergeActive && tPhysics>strutEmergeStartT+STRUT_EMERGE_SPREAD+STRUT_EMERGE_FADE+0.2){
+        strutEmergeActive=false; // emerge choreography finished — normal full-brightness struts from here
+      }
+    }
+    if(firstStrutBuildDone) refreshStrutBuffers(hueBase);
+
+    // Fade the intro fog out in step with the wake ramp, then drop it — the
+    // lattice reads richly enough on its own past that point.
+    if(scene.fog){
+      const ft=wake;
+      scene.fog.near=lerp(9.5,400,ft);
+      scene.fog.far =lerp(15.5,420,ft);
+      if(ft>=1) scene.fog=null;
+    }
+  }
+
+  // Camera: endless orbit — driven by accumulated scroll + a slow autonomous
+  // drift, so the piece keeps turning even if nobody scrolls. Pinch-zoom
+  // adjusts camR (the orbit/dolly distance) directly.
+  const angle=scrollAngle+autoAngle;
+  camera.position.x=Math.sin(angle)*camR;
+  camera.position.z=Math.cos(angle)*camR;
+  camera.position.y=Math.sin(t*0.05)*0.5;
+  camera.lookAt(0,0,0);
+
+  renderer.render(scene,camera);
+}
+
+sizeRenderer();
+animate(performance.now());
+})();
+</script>
+</body>
+</html>
