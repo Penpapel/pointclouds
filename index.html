@@ -25,12 +25,156 @@ body{
 #canvas-wrap{position:fixed;inset:0;z-index:0}
 canvas{display:block;width:100%!important;height:100%!important}
 #spacer{position:relative;z-index:0;pointer-events:none}
+
+/* ── SPACETM DEPARTURE BOARD — split-flap overlay, lower third ───────── */
+@import url('https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Mono:wght@500&display=swap');
+
+#spacetm-board{
+  position:fixed;
+  left:0;right:0;
+  top:66.667vh;
+  bottom:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  z-index:5;
+  pointer-events:none; /* touches pass through to the lattice underneath */
+}
+
+#spacetm-board .rig{
+  --ink:#0a0c0f;
+  --ink-2:#050607;
+  --panel:#14171c;
+  --tile-top:#1e2227;
+  --tile-bot:#0e1114;
+  --edge:#2c3138;
+  --char:#f3ede1;
+  --groove:#020303;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:clamp(10px,2vh,18px);
+  font-family:'Oswald','Arial Narrow',Arial,sans-serif;
+}
+
+#spacetm-board .board{
+  display:flex;
+  align-items:flex-end;
+  gap:clamp(4px,1.3vw,7px);
+  padding:clamp(10px,2.6vw,16px) clamp(12px,3vw,18px);
+  border-radius:14px;
+  background:linear-gradient(180deg,var(--panel) 0%,var(--ink-2) 100%);
+  box-shadow:
+    0 30px 60px -25px rgba(0,0,0,0.75),
+    inset 0 1px 0 rgba(255,255,255,0.05),
+    inset 0 0 0 1px rgba(255,255,255,0.02);
+  position:relative;
+}
+
+#spacetm-board .tile{
+  position:relative;
+  width:clamp(26px,7.4vw,40px);
+  height:clamp(38px,10.6vw,58px);
+  perspective:400px;
+  border-radius:5px;
+  box-shadow:0 3px 0 rgba(0,0,0,0.5), inset 0 0 0 1px rgba(0,0,0,0.5);
+}
+#spacetm-board .tile.small{
+  width:clamp(7px,1.9vw,10px);
+  height:clamp(10px,2.9vw,14px);
+  border-radius:3px;
+  box-shadow:0 2px 0 rgba(0,0,0,0.5), inset 0 0 0 1px rgba(0,0,0,0.5);
+}
+
+#spacetm-board .tile .inner{
+  position:absolute;
+  inset:0;
+  transform-style:preserve-3d;
+  transform:rotateX(0deg);
+  transition:transform 118ms cubic-bezier(.6,0,.85,.15);
+  border-radius:inherit;
+}
+#spacetm-board .tile .inner.no-transition{transition:none!important}
+#spacetm-board .tile .inner.flip{transform:rotateX(-180deg)}
+
+#spacetm-board .face{
+  position:absolute;
+  inset:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  backface-visibility:hidden;
+  border-radius:inherit;
+  line-height:1;
+  letter-spacing:0;
+  color:var(--char);
+  background:linear-gradient(180deg,var(--tile-top) 0%,var(--tile-top) 50%,var(--tile-bot) 50%,var(--tile-bot) 100%);
+  font-weight:600;
+  font-size:clamp(18px,5.6vw,30px);
+}
+#spacetm-board .tile.small .face{font-size:clamp(6px,1.5vw,8px);font-weight:600}
+#spacetm-board .face.back{transform:rotateX(180deg)}
+
+#spacetm-board .tile .inner::after{
+  content:"";
+  position:absolute;
+  left:0;right:0;top:50%;
+  height:2px;
+  background:var(--groove);
+  transform:translateY(-1px);
+  z-index:4;
+  pointer-events:none;
+}
+#spacetm-board .tile::before{
+  content:"";
+  position:absolute;
+  inset:0;
+  border-radius:inherit;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.06);
+  pointer-events:none;
+  z-index:5;
+}
+#spacetm-board .rivet{
+  position:absolute;
+  width:3px;height:3px;
+  border-radius:50%;
+  background:var(--edge);
+  box-shadow:inset 0 0.5px 0 rgba(255,255,255,0.15);
+  z-index:6;
+}
+#spacetm-board .rivet.tl{top:3px;left:3px}
+#spacetm-board .rivet.tr{top:3px;right:3px}
+#spacetm-board .rivet.bl{bottom:3px;left:3px}
+#spacetm-board .rivet.br{bottom:3px;right:3px}
+
+#spacetm-board .board.sub{
+  justify-content:center;
+  padding:clamp(6px,1.6vw,10px) clamp(8px,2vw,12px);
+  gap:clamp(2px,0.6vw,3px);
+  border-radius:9px;
+  box-shadow:
+    0 16px 32px -18px rgba(0,0,0,0.7),
+    inset 0 1px 0 rgba(255,255,255,0.05),
+    inset 0 0 0 1px rgba(255,255,255,0.02);
+  transition:opacity 200ms ease;
+}
+
+@media (prefers-reduced-motion: reduce){
+  #spacetm-board .tile .inner{transition:none}
+}
 </style>
 </head>
 <body>
 
 <div id="canvas-wrap"><canvas id="c"></canvas></div>
 <div id="spacer"></div>
+
+<div id="spacetm-board" aria-hidden="true">
+  <div class="rig">
+    <div class="board" id="stm-board"></div>
+    <div class="board sub" id="stm-subboard"></div>
+  </div>
+</div>
 
 <script>
 (function(){
@@ -746,6 +890,181 @@ function animate(now){
 
 sizeRenderer();
 animate(performance.now());
+})();
+</script>
+
+<!-- SPACETM DEPARTURE BOARD — split-flap tile animation, independent of the lattice above -->
+<script>
+(function(){
+  var TARGET = ["S","P","A","C","E","T","M"];
+  var SUB_WORDS = ["SPACEFRAMING","METAMATERIALS","CONSTELLATIONS"];
+  var CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  var board = document.getElementById("stm-board");
+  var subboard = document.getElementById("stm-subboard");
+  var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function buildTile(container, variant){
+    var tile = document.createElement("div");
+    tile.className = "tile" + (variant === "small" ? " small" : "");
+    var inner = document.createElement("div");
+    inner.className = "inner";
+    var front = document.createElement("div");
+    front.className = "face front";
+    var back = document.createElement("div");
+    back.className = "face back";
+    var start = CHARS[Math.floor(Math.random()*CHARS.length)];
+    front.textContent = start;
+    back.textContent = start;
+    inner.appendChild(front);
+    inner.appendChild(back);
+    tile.appendChild(inner);
+    if(variant !== "small"){
+      ["tl","tr","bl","br"].forEach(function(pos){
+        var r = document.createElement("span");
+        r.className = "rivet " + pos;
+        tile.appendChild(r);
+      });
+    }
+    container.appendChild(tile);
+    return { tile: tile, inner: inner, front: front, back: back };
+  }
+
+  var tiles = [];
+  TARGET.forEach(function(ch){ var t = buildTile(board, "main"); t.target = ch; tiles.push(t); });
+
+  function sleep(ms){ return new Promise(function(res){ setTimeout(res, ms); }); }
+
+  function randChar(exclude){
+    var c;
+    do { c = CHARS[Math.floor(Math.random()*CHARS.length)]; } while(c === exclude);
+    return c;
+  }
+
+  function flip(t, nextChar, dur){
+    return new Promise(function(resolve){
+      var done = false;
+      var timer;
+      function finish(){
+        if(done) return;
+        done = true;
+        clearTimeout(timer);
+        t.inner.removeEventListener("transitionend", onEnd);
+        t.inner.classList.add("no-transition");
+        t.inner.classList.remove("flip");
+        t.front.textContent = nextChar;
+        void t.inner.offsetWidth;
+        t.inner.classList.remove("no-transition");
+        resolve();
+      }
+      function onEnd(e){
+        if(e.target === t.inner) finish();
+      }
+      t.back.textContent = nextChar;
+      t.inner.style.transitionDuration = dur + "ms";
+      t.inner.addEventListener("transitionend", onEnd);
+      requestAnimationFrame(function(){ t.inner.classList.add("flip"); });
+      // Safety net: some browsers drop transitionend on elements that get
+      // resized/rebuilt mid-flight, which would otherwise stall the whole
+      // sequence forever. Force resolution shortly after the transition
+      // should have finished.
+      timer = setTimeout(finish, dur + 120);
+    });
+  }
+
+  async function runTile(t, index, opts){
+    opts = opts || {};
+    var stride = opts.stride != null ? opts.stride : 85;
+    var stepsMin = opts.stepsMin != null ? opts.stepsMin : 10;
+    var stepsRange = opts.stepsRange != null ? opts.stepsRange : 6;
+    var baseDur = opts.baseDur != null ? opts.baseDur : 90;
+    var durStep = opts.durStep != null ? opts.durStep : 3;
+    var finalDur = opts.finalDur != null ? opts.finalDur : 150;
+
+    await sleep(index * stride);
+    if(reduced){
+      await flip(t, t.target, 1);
+      return;
+    }
+    var steps = stepsMin + Math.floor(Math.random()*stepsRange);
+    for(var i=0; i<steps; i++){
+      var c = randChar(t.front.textContent);
+      var dur = baseDur + i * durStep;
+      await flip(t, c, dur);
+    }
+    await flip(t, t.target, finalDur);
+  }
+
+  async function cycle(){
+    await Promise.all(tiles.map(function(t, i){ return runTile(t, i); }));
+    await sleep(reduced ? 3000 : 4600);
+    cycle();
+  }
+
+  // The sub-board is a fixed-width module, sized once to match the main
+  // board and to fit the longest rotating word. Every tile uses that same
+  // fixed size always — shorter words just use fewer tiles, centered —
+  // so the module never resizes itself from one word to the next.
+  var MAX_SUB_LEN = SUB_WORDS.reduce(function(m, w){ return Math.max(m, w.length); }, 1);
+  var subMetrics = { w: 16, h: 22, font: 10 };
+
+  function computeSubMetrics(){
+    var totalWidth = board.getBoundingClientRect().width;
+    if(totalWidth <= 0) return;
+    subboard.style.width = totalWidth + "px";
+    var cs = getComputedStyle(subboard);
+    var padL = parseFloat(cs.paddingLeft) || 0;
+    var padR = parseFloat(cs.paddingRight) || 0;
+    var gap = parseFloat(cs.columnGap) || parseFloat(cs.gap) || 0;
+    var available = totalWidth - padL - padR - gap * (MAX_SUB_LEN - 1);
+    var tileW = Math.max(available / MAX_SUB_LEN, 6);
+    subMetrics.w = tileW;
+    subMetrics.h = tileW * 1.42;
+    subMetrics.font = tileW * 0.62;
+  }
+
+  function buildSubtitleTiles(word){
+    subboard.innerHTML = "";
+    var arr = [];
+    for(var i=0; i<word.length; i++){
+      var t = buildTile(subboard, "small");
+      t.tile.style.width = subMetrics.w + "px";
+      t.tile.style.height = subMetrics.h + "px";
+      t.front.style.fontSize = subMetrics.font + "px";
+      t.back.style.fontSize = subMetrics.font + "px";
+      t.target = word[i];
+      arr.push(t);
+    }
+    return arr;
+  }
+
+  function debounce(fn, wait){
+    var t;
+    return function(){
+      clearTimeout(t);
+      t = setTimeout(fn, wait);
+    };
+  }
+
+  async function subCycle(){
+    var wordIndex = 0;
+    while(true){
+      var word = SUB_WORDS[wordIndex % SUB_WORDS.length];
+      wordIndex++;
+      var subTiles = buildSubtitleTiles(word);
+      subboard.style.opacity = "0";
+      requestAnimationFrame(function(){ subboard.style.opacity = "1"; });
+      await Promise.all(subTiles.map(function(t, i){
+        return runTile(t, i, { stride:40, stepsMin:6, stepsRange:6, baseDur:70, durStep:3, finalDur:110 });
+      }));
+      await sleep(reduced ? 1600 : 2300);
+    }
+  }
+
+  computeSubMetrics();
+  window.addEventListener("resize", debounce(computeSubMetrics, 200));
+
+  cycle();
+  subCycle();
 })();
 </script>
 </body>
